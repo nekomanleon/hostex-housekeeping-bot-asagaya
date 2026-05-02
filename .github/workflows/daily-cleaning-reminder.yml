@@ -3,7 +3,7 @@ name: Hostex Housekeeping Reminder
 on:
   workflow_dispatch:
   schedule:
-    - cron: "58 0 * * *" # 08:58 Asia/Shanghai every day
+       - cron: "0 23 * * *" # 08:00 Japan time every day
 
 permissions:
   contents: read
@@ -18,14 +18,15 @@ jobs:
     timeout-minutes: 30
     env:
       PYTHONIOENCODING: utf-8
-      TZ: Asia/Shanghai
+      TZ: Asia/Tokyo
       HOSTEX_HEADLESS: "true"
-      HOSTEX_CLEANING_TARGET_ROOMS: "押上301,押上402"
-      HOSTEX_CLEANING_TIMEZONE: "Asia/Shanghai"
+
+      HOSTEX_CLEANING_TARGET_ROOMS: "阿佐谷A,阿佐谷B,阿佐谷C"
+      HOSTEX_CLEANING_TIMEZONE: "Asia/Tokyo"
       HOSTEX_REMINDER_DAY_DIFFS: "2,1,0"
       HOSTEX_USERNAME: "leonzhang@lodgegeek.com"
       HOSTEX_PASSWORD: "Bigman844721482"
-      WECOM_WEBHOOK: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=9f64d413-d651-4a75-8a4d-a55fa173c754"
+      WECOM_WEBHOOK: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=c0792157-f79f-4ec3-9151-662c804619e1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

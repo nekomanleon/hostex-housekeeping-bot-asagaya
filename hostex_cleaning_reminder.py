@@ -14,19 +14,22 @@ from zoneinfo import ZoneInfo
 import requests
 from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
-CALENDAR_URL = os.getenv("HOSTEX_CALENDAR_URL", "https://hostex.io/app/calendar").strip()
-HOSTEX_USERNAME = os.getenv("HOSTEX_USERNAME") or os.getenv("HOSTEX_EMAIL") or ""
-HOSTEX_PASSWORD = os.getenv("HOSTEX_PASSWORD", "")
-TARGET_ROOM = os.getenv("HOSTEX_CLEANING_TARGET_ROOM", "阿佐谷A").strip() or "阿佐谷A"
-TARGET_ROOMS_RAW = os.getenv("HOSTEX_CLEANING_TARGET_ROOMS", "").strip()
-ROOM_LABEL = os.getenv("HOSTEX_CLEANING_ROOM_LABEL", "").strip() or TARGET_ROOM
-TIMEZONE_NAME = os.getenv("HOSTEX_CLEANING_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai"
+CALENDAR_URL = "https://hostex.io/app/calendar"
+
+# 本地测试用：先写死
+HOSTEX_USERNAME = "leonzhang@lodgegeek.com"
+HOSTEX_PASSWORD = "Bigman844721482"
+
+TARGET_ROOM = "阿佐谷A"
+TARGET_ROOMS_RAW = "阿佐谷A,阿佐谷B,阿佐谷C"
+ROOM_LABEL = TARGET_ROOM
+TIMEZONE_NAME = "Asia/Tokyo"
 TODAY_OVERRIDE = os.getenv("HOSTEX_TODAY_OVERRIDE", "").strip()
-HEADLESS = os.getenv("HOSTEX_HEADLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
+HEADLESS = False
 IGNORE_HTTPS_ERRORS = os.getenv("HOSTEX_IGNORE_HTTPS_ERRORS", "false").strip().lower() in {"1", "true", "yes", "on"}
-DEBUG = os.getenv("HOSTEX_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
-REMINDER_DAY_DIFF_RAW = os.getenv("HOSTEX_REMINDER_DAY_DIFF", "").strip()
-REMINDER_DAY_DIFFS_RAW = os.getenv("HOSTEX_REMINDER_DAY_DIFFS", "").strip()
+DEBUG = True
+REMINDER_DAY_DIFF_RAW = ""
+REMINDER_DAY_DIFFS_RAW = "2,1,0"
 LOGIN_TIMEOUT_MS = int(os.getenv("HOSTEX_LOGIN_TIMEOUT_MS", "90000"))
 PAGE_TIMEOUT_MS = int(os.getenv("HOSTEX_PAGE_TIMEOUT_MS", "90000"))
 ROOM_FILTER_WAIT_MS = int(os.getenv("HOSTEX_ROOM_FILTER_WAIT_MS", "2500"))
@@ -243,13 +246,7 @@ def parse_visible_date_labels(labels: list[str], today: date) -> list[date]:
 
 
 def load_wecom_webhook() -> str:
-    value = os.getenv("WECOM_WEBHOOK", "").strip()
-    if value:
-        return value
-    path = Path("wecom_webhook.txt")
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
-    return ""
+    return "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=c0792157-f79f-4ec3-9151-662c804619e1"
 
 
 def is_transparent(color: str) -> bool:
@@ -337,17 +334,50 @@ def snapshot_with_events(snapshot: CalendarSnapshot, events: list[CleaningEvent]
     )
 
 
-def build_wecom_message(snapshot: CalendarSnapshot) -> str:
+def build_wecom_room_line(snapshot: CalendarSnapshot) -> list[str]:
     if not snapshot.events:
-        return f"各位打扰了，{snapshot.room_label}当前没有识别到明确的退房清扫安排。"
+        return []
 
     primary = snapshot.events[0]
     lines = [
-        f"各位打扰了，{snapshot.room_label}将在{format_cn_date(primary.cleaning_date)}退房，麻烦各位安排一下打扫，多谢。",
+        f"{snapshot.room_label}将在{format_cn_date(primary.cleaning_date)}上午11am退房"
     ]
+
     if primary.back_to_back:
         lines.append("注意这次客人背靠背，退房时间11AM，下一波客人入住时间16PM。")
-    return "\n".join(lines)
+
+    return lines
+
+
+def build_wecom_combined_message(snapshots: list[CalendarSnapshot]) -> str:
+    room_lines: list[str] = []
+    back_to_back_lines: list[str] = []
+
+    for snapshot in snapshots:
+        if not snapshot.events:
+            continue
+
+        primary = snapshot.events[0]
+        room_lines.append(
+            f"{snapshot.room_label}将在{format_cn_date(primary.cleaning_date)}上午11点退房"
+        )
+
+        if primary.back_to_back:
+            back_to_back_lines.append(
+                f"{snapshot.room_label}注意这次客人背靠背，退房时间11AM，下一波客人入住时间16PM。"
+            )
+
+    if not room_lines:
+        return ""
+
+    message_lines = [
+        "各位打扰了，" + "，".join(room_lines) + "，麻烦各位安排一下打扫，多谢。"
+    ]
+
+    if back_to_back_lines:
+        message_lines.extend(back_to_back_lines)
+
+    return "\n".join(message_lines)
 
 
 def build_message(snapshot: CalendarSnapshot) -> str:
@@ -946,7 +976,10 @@ async def run() -> tuple[str, list[str]]:
 
             for snapshot in send_snapshots:
                 log_blocks.append(build_message(snapshot))
-                wecom_messages.append(build_wecom_message(snapshot))
+
+            combined_wecom_message = build_wecom_combined_message(send_snapshots)
+            if combined_wecom_message:
+                wecom_messages.append(combined_wecom_message)
 
             for snapshot in skip_snapshots:
                 log_blocks.append(build_skip_message(snapshot, REMINDER_DAY_DIFFS))
