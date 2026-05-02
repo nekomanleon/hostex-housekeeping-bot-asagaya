@@ -713,6 +713,70 @@ async def apply_room_filter(page: Page, room_name: str) -> None:
         pass
     await page.wait_for_timeout(ROOM_FILTER_WAIT_MS)
 
+async def ensure_calendar_on_today(page: Page) -> None:
+    """
+    标准：
+    1. 日历可见区间必须包含 today
+    2. today 不能太靠右；today - visible_start 最好在 0~7 天内
+       这样可以避免误用 2026-04-13 -> 2026-05-03 这种旧窗口。
+    """
+    today = today_local()
+
+    for attempt in range(1, 5):
+        try:
+            labels = await page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('host-calendar-date-cell .date'))
+                  .filter(el => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                      && style.visibility !== 'hidden'
+                      && Number(style.opacity || '1') !== 0
+                      && rect.width >= 1
+                      && rect.height >= 1
+                      && rect.right > 0
+                      && rect.left < window.innerWidth;
+                  })
+                  .map(el => (el.innerText || '').trim())
+                  .filter(Boolean)
+                """
+            )
+
+            visible_dates = parse_visible_date_labels(labels, today)
+            visible_start = visible_dates[0]
+            visible_end = visible_dates[-1]
+            offset = (today - visible_start).days
+
+            print(
+                f"日历日期校验第 {attempt} 次: "
+                f"{visible_start} -> {visible_end}, today={today}, offset={offset}"
+            )
+
+            if visible_start <= today <= visible_end and 0 <= offset <= 7:
+                return
+
+        except Exception as exc:
+            print(f"日历日期校验失败第 {attempt} 次: {exc}")
+
+        today_button = (
+            await first_visible(page.get_by_text(re.compile(r"今天|Today", re.IGNORECASE)))
+            or await first_visible(page.locator("button").filter(has_text=re.compile(r"今天|Today", re.IGNORECASE)))
+        )
+
+        if today_button is not None:
+            try:
+                await today_button.click(timeout=3000)
+                await page.wait_for_timeout(4000)
+                continue
+            except Exception as exc:
+                print(f"点击今天按钮失败: {exc}")
+
+        await page.reload(wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        await page.wait_for_timeout(5000)
+
+    raise RuntimeError("日历没有定位到今天附近，停止抓取，避免播报错误数据。")
+
 
 async def visible_nodes(page: Page) -> list[dict[str, Any]]:
     nodes = await page.evaluate(VISIBLE_TEXT_NODES_SCRIPT)
@@ -880,19 +944,55 @@ def compute_events(bars: list[dict[str, Any]], columns: list[CalendarColumn], to
     return annotate_back_to_back(events)
 
 async def build_snapshot(page: Page, room_name: str, room_label: str) -> CalendarSnapshot:
+    await login_if_needed(page)
+
+    # 先确保日历在今天附近
+    await ensure_calendar_on_today(page)
+
+    # 再过滤房间
     await apply_room_filter(page, room_name)
+    await page.wait_for_timeout(3000)
+
+    # 过滤后再次确保没有跳到旧日期
+    await ensure_calendar_on_today(page)
+
+    # 优先用 Hostex DOM 里的 data-in / nights 来算，不依赖横向坐标
     dom_snapshot = await wait_for_filtered_dom_snapshot(page, room_name, room_label)
     if dom_snapshot is not None:
+        if not (dom_snapshot.visible_start <= dom_snapshot.today <= dom_snapshot.visible_end):
+            raise RuntimeError(
+                f"{room_name} DOM日期区间异常: "
+                f"{dom_snapshot.visible_start} -> {dom_snapshot.visible_end}, today={dom_snapshot.today}"
+            )
         return dom_snapshot
 
-    await login_if_needed(page)
+    # DOM 方案失败时，再走旧的坐标方案
     room_box = await filter_room(page, room_name)
-
     today = today_local()
-    columns = parse_columns(await visible_nodes(page), room_box, today)
+    nodes = await visible_nodes(page)
+    columns = parse_columns(nodes, room_box, today)
+
+    visible_start = columns[0].visible_date
+    visible_end = columns[-1].visible_date
+    offset = (today - visible_start).days
+
+    if not (visible_start <= today <= visible_end and 0 <= offset <= 7):
+        raise RuntimeError(
+            f"{room_name} 日历区间异常: {visible_start} -> {visible_end}, today={today}, offset={offset}"
+        )
+
     bars, skipped = extract_bars(await row_nodes(page, room_box), columns)
     events = compute_events(bars, columns, today)
-    return CalendarSnapshot(room_name, room_label, today, columns[0].visible_date, columns[-1].visible_date, events, skipped)
+
+    return CalendarSnapshot(
+        room_name,
+        room_label,
+        today,
+        visible_start,
+        visible_end,
+        events,
+        skipped,
+    )
 
 
 async def collect_snapshot_with_retry(page: Page, room_name: str, room_label: str) -> CalendarSnapshot:
